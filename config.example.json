@@ -1,0 +1,10 @@
+{
+  "exempt_v4_cidrs": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"],
+  "nat64_prefixes": ["64:ff9b::/96"],
+  "nat64_is_billed": true,
+  "monthly_v4_quota_gb": 200,
+  "billing_counts_upload": false,
+  "alert_threshold_mb_per_sec": 5.0,
+  "alert_sustain_seconds": 30,
+  "alert_cooldown_minutes": 5
+}

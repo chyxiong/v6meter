@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <AssemblyName>v6meter</AssemblyName>
+    <AssemblyTitle>v6meter 校园网 IPv4/IPv6 流量监控</AssemblyTitle>
+    <Product>v6meter</Product>
+    <Description>v6meter 校园网 IPv4/IPv6 流量监控</Description>
+    <Version>1.0.0</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <!-- Release is one self-contained exe (see build/publish.ps1). TraceEvent and SQLite carry native DLLs,
+       which must be bundled too. Not compressed: ~119 MB on disk, but the assemblies are mapped from the file
+       instead of being unpacked into private memory (measured ~18 MB vs ~68 MB resident). -->
+  <PropertyGroup>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\V6Meter.Core\V6Meter.Core.csproj" />
+  </ItemGroup>
+
+</Project>

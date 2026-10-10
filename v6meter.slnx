@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/V6Meter.App/V6Meter.App.csproj" />
+    <Project Path="src/V6Meter.Cli/V6Meter.Cli.csproj" />
+    <Project Path="src/V6Meter.Core/V6Meter.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/V6Meter.Core.Tests/V6Meter.Core.Tests.csproj" />
+  </Folder>
+</Solution>
