@@ -61,8 +61,19 @@ public sealed class MeterEngine : IMeterEngine
     private Task? _loop;
     private DateTime _sessionStartedUtc;
     private int _lostInEndedSessions;
+    private int _lostSeen;
 
-    public MeterEngine(ClassifierOptions options) => _aggregator = new Aggregator(options);
+    private readonly string _sessionName;
+
+    /// <param name="sessionName">
+    /// ETW session name. A stale session with this name is stopped on start, so two programs must never share
+    /// one: the tray app uses the default, the debug CLI its own.
+    /// </param>
+    public MeterEngine(ClassifierOptions options, string sessionName = KernelNetworkSession.DefaultSessionName)
+    {
+        _aggregator = new Aggregator(options);
+        _sessionName = sessionName;
+    }
 
     public event Action<MeterSnapshot>? Tick;
 
@@ -90,7 +101,7 @@ public sealed class MeterEngine : IMeterEngine
 
     private void StartSession()
     {
-        _session = new KernelNetworkSession(e => _flows.Add(e), _resolver.OnProcessStart);
+        _session = new KernelNetworkSession(e => _flows.Add(e), _resolver.OnProcessStart, _sessionName);
         _session.Start();
         _sessionStartedUtc = DateTime.UtcNow;
     }
@@ -112,6 +123,7 @@ public sealed class MeterEngine : IMeterEngine
         {
             StartSession();
             SessionRestarts++;
+            _resolver.Revalidate(); // process starts during the gap were not seen
         }
         catch (Exception ex)
         {
@@ -209,6 +221,14 @@ public sealed class MeterEngine : IMeterEngine
         foreach (var old in _nicAtSecondStart.Keys.Where(k => k <= target).ToList())
             _nicAtSecondStart.Remove(old);
 
+        // Dropped events may include process starts, so cached PIDs may have changed hands unseen.
+        int lost = _lostInEndedSessions + (_session?.EventsLost ?? 0);
+        if (lost > _lostSeen)
+        {
+            _lostSeen = lost;
+            _resolver.Revalidate();
+        }
+
         Tick?.Invoke(new MeterSnapshot(
             DateTime.Now,
             second.Traffic,
@@ -216,7 +236,7 @@ public sealed class MeterEngine : IMeterEngine
             _aggregator.Processes.Select(p => new ProcessRow(p.Identity, p.LastSecond.Clone(), p.Total.Clone())).ToList(),
             rec,
             _reconciler.Total,
-            _lostInEndedSessions + (_session?.EventsLost ?? 0),
+            lost,
             _flows.TotalEvents,
             map,
             CollectorDown: CollectorDown));

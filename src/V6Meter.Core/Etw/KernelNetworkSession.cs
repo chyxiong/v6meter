@@ -11,6 +11,9 @@ namespace V6Meter.Core.Etw;
 public sealed class KernelNetworkSession : IDisposable
 {
     public const string DefaultSessionName = "v6meter-session";
+
+    /// <summary>The debug CLI's session, so running it never stops the tray app's (and vice versa).</summary>
+    public const string CliSessionName = "v6meter-cli-session";
     public static readonly Guid ProviderGuid = new("7dd42a49-5329-4832-8dfd-43d979153a88");
 
     private const ulong KeywordIPv4 = 0x10;

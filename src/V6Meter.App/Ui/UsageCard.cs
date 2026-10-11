@@ -4,7 +4,8 @@ namespace V6Meter.App.Ui;
 
 /// <summary>
 /// Usage tile: IPv4 used since v6meter started (nothing is kept across runs; the school's own record is the
-/// monthly figure) and, once queried, the school's monthly usage against the quota. Plus the two actions.
+/// monthly figure) and, once queried, the school's monthly usage against the quota. Plus three actions
+/// (query usage, log in, config / run as admin) that switch to short captions when the card is narrow.
 /// </summary>
 internal sealed class UsageCard : Card
 {
@@ -15,12 +16,35 @@ internal sealed class UsageCard : Card
     private UsageView? _view;
 
     public FlatButton QueryButton { get; } = new() { Text = "查询校园网用量" };
+    public FlatButton LoginButton { get; } = new() { Text = "登录校园网" };
     public FlatButton ConfigButton { get; } = new() { Text = "打开配置" };
+
+    // Full and short captions; the short ones are used when the full row does not fit the card.
+    private readonly Dictionary<FlatButton, (string Full, string Short)> _labels = new();
+    private bool _layingOut;
 
     public UsageCard()
     {
+        SetLabels(QueryButton, "查询校园网用量", "查询用量");
+        SetLabels(LoginButton, "登录校园网", "登录");
+        SetLabels(ConfigButton, "打开配置", "配置");
         Controls.Add(QueryButton);
+        Controls.Add(LoginButton);
         Controls.Add(ConfigButton);
+    }
+
+    public void SetLabels(FlatButton button, string full, string shortText)
+    {
+        _labels[button] = (full, shortText);
+        PerformLayout();
+    }
+
+    /// <summary>Shows a temporary caption (e.g. "登录中…") and disables the button; null restores it.</summary>
+    public void SetBusy(FlatButton button, string? busyText)
+    {
+        button.Enabled = busyText == null;
+        button.Tag = busyText;
+        PerformLayout();
     }
 
     public void SetView(UsageView v)
@@ -34,11 +58,34 @@ internal sealed class UsageCard : Card
     protected override void OnLayout(LayoutEventArgs e)
     {
         base.OnLayout(e);
-        foreach (var b in new[] { QueryButton, ConfigButton })
-            b.Size = b.GetPreferredSize(Size.Empty);
-        int y = Height - Padding.Bottom - QueryButton.Height;
-        ConfigButton.Location = new Point(Width - Padding.Right - ConfigButton.Width, y);
-        QueryButton.Location = new Point(ConfigButton.Left - S(8) - QueryButton.Width, y);
+        if (_layingOut)
+            return; // changing Text below re-enters layout
+        _layingOut = true;
+        try
+        {
+            var row = new[] { QueryButton, LoginButton, ConfigButton };
+            int gap = S(8), available = Width - Padding.Horizontal;
+            foreach (bool compact in new[] { false, true })
+            {
+                foreach (var b in row)
+                {
+                    var (full, shortText) = _labels.TryGetValue(b, out var l) ? l : (b.Text, b.Text);
+                    b.Text = b.Tag as string ?? (compact ? shortText : full);
+                    b.Size = b.GetPreferredSize(Size.Empty);
+                }
+                if (row.Sum(b => b.Width) + gap * (row.Length - 1) <= available)
+                    break;
+            }
+            int y = Height - Padding.Bottom - QueryButton.Height;
+            int x = Width - Padding.Right;
+            for (int i = row.Length - 1; i >= 0; i--) // right-aligned
+            {
+                x -= row[i].Width;
+                row[i].Location = new Point(x, y);
+                x -= gap;
+            }
+        }
+        finally { _layingOut = false; }
     }
 
     protected override void PaintContent(Graphics g, Palette p, Rectangle c)
@@ -80,7 +127,7 @@ internal sealed class UsageCard : Card
                 : $"学校记录本月已用 {ByteFormat.Size(campus.ActualFlowBytes)}（{v.CampusAt:HH:mm} 查询）";
         }
         else
-            note = "关闭后清零。本月用量以学校记录为准，点“查询校园网用量”查看";
+            note = v.LoginNote ?? "关闭后清零。本月用量以学校记录为准，点“查询校园网用量”查看";
 
         int noteBottom = QueryButton.Top - S(4);
         TextRenderer.DrawText(g, note, _small, new Rectangle(c.X, y, c.Width, Math.Max(0, noteBottom - y)), p.TextSecondary,

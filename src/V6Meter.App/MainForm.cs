@@ -12,7 +12,8 @@ namespace V6Meter.App;
 /// <summary>What the usage card shows.</summary>
 /// <param name="RunBytes">Admin: billed IPv4 since start. User mode: estimated IPv4 download since start.</param>
 /// <param name="Campus">The last campus query this run, if any (its flow is already the actual, ×2, figure).</param>
-internal sealed record UsageView(long RunBytes, DateTime Since, bool UserMode, CampusStatus? Campus, DateTime CampusAt, long QuotaBytes);
+/// <param name="LoginNote">A campus auto-login problem worth showing on the card, if any.</param>
+internal sealed record UsageView(long RunBytes, DateTime Since, bool UserMode, CampusStatus? Campus, DateTime CampusAt, long QuotaBytes, string? LoginNote = null);
 
 /// <summary>
 /// Main window. Everything except the process table is custom-painted (no per-value child controls),
@@ -43,6 +44,7 @@ internal sealed class MainForm : Form
     private bool _proxySeen;
 
     public event EventHandler? QueryCampusClicked;
+    public event EventHandler? LoginCampusClicked;
     public event EventHandler? OpenConfigClicked;
     public event EventHandler? RunAsAdminClicked;
     public event EventHandler<bool>? AutostartToggled;
@@ -62,18 +64,19 @@ internal sealed class MainForm : Form
         DoubleBuffered = true;
 
         _usage.QueryButton.Click += (s, e) => QueryCampusClicked?.Invoke(this, e);
+        _usage.LoginButton.Click += (s, e) => LoginCampusClicked?.Invoke(this, e);
         if (user)
         {
-            _usage.ConfigButton.Text = "以管理员身份运行";
+            _usage.SetLabels(_usage.ConfigButton, "以管理员身份运行", "管理员");
             _usage.ConfigButton.Click += (s, e) => RunAsAdminClicked?.Invoke(this, e);
         }
         else
             _usage.ConfigButton.Click += (s, e) => OpenConfigClicked?.Invoke(this, e);
 
         int gap = S(12);
-        _cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34));
-        _cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34));
-        _cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 32));
+        _cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 31));
+        _cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 31));
+        _cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 38)); // the usage card holds three buttons
         foreach (var (card, i) in new Card[] { _v4, _v6, _usage }.Select((c, i) => (c, i)))
         {
             card.Dock = DockStyle.Fill;
@@ -193,6 +196,8 @@ internal sealed class MainForm : Form
     }
 
     public void SetAutostart(bool on) => _autostart.On = on;
+
+    public void SetLoginBusy(bool busy) => _usage.SetBusy(_usage.LoginButton, busy ? "登录中…" : null);
 
     public void UpdateView(MeterSnapshot snap, UsageView usage)
     {

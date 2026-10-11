@@ -46,6 +46,26 @@ public sealed class ProcessResolver : IProcessResolver
     private Dictionary<uint, List<ServiceEntry>> _services = new();
     private DateTime _servicesAt = DateTime.MinValue;
 
+    // Records created before this time are checked against the live process once before being trusted again.
+    private DateTime _revalidateBefore = DateTime.MinValue;
+
+    /// <summary>
+    /// Start events may have been missed (the session was recreated, or ETW dropped events), so a cached PID
+    /// may now belong to a new process. Each record is re-checked against the live process's creation time the
+    /// next time it is used. Call from the aggregation thread.
+    /// </summary>
+    public void Revalidate() => _revalidateBefore = DateTime.UtcNow;
+
+    private static ProcRecord Revalidated(uint pid, ProcRecord cached, DateTime now)
+    {
+        var live = QueryLive(pid, now);
+        // A different live process holds the PID now: it replaces the cached one, which stays as the previous
+        // owner for traffic still being settled. If the process is gone or is the same one, keep what we had.
+        if (live.Path != null && (live.CreateTimeUtc - cached.CreateTimeUtc).Duration() > TimeSpan.FromSeconds(1))
+            return live with { Previous = cached with { Previous = null } };
+        return cached with { QueriedUtc = now };
+    }
+
     /// <summary>Called on the ETW thread; only stores the record.</summary>
     public void OnProcessStart(ProcessStartEvent e)
     {
@@ -73,6 +93,10 @@ public sealed class ProcessResolver : IProcessResolver
         else if (rec == null || (rec.Path == null && now - rec.QueriedUtc > NegativeRetry))
         {
             _byPid[pid] = rec = QueryLive(pid, now);
+        }
+        else if (rec.QueriedUtc < _revalidateBefore)
+        {
+            _byPid[pid] = rec = Revalidated(pid, rec, now);
         }
         rec.UsedUtc = now;
         if (rec.Path == null)

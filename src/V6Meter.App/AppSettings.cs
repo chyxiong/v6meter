@@ -13,6 +13,13 @@ internal static class AppSettings
         set => Set(nameof(ShowTaskbarWidget), value ? 1 : 0);
     }
 
+    /// <summary>Auto-login to the campus network (the account itself is in Credential Manager). Off by default.</summary>
+    public static bool CampusAutoLogin
+    {
+        get => Get(nameof(CampusAutoLogin), 0) != 0;
+        set => Set(nameof(CampusAutoLogin), value ? 1 : 0);
+    }
+
     /// <summary>Rate-alert notifications are off until this local time (kept so "today" survives a restart).</summary>
     public static DateTime AlertsSnoozedUntil
     {

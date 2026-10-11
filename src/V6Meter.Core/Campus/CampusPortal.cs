@@ -20,7 +20,25 @@ public sealed record CampusStatus(int Minutes, long ReportedFlowBytes, decimal B
 /// </summary>
 public static partial class CampusPortal
 {
-    public const string StatusUrl = "http://172.18.3.3/1";
+    /// <summary>
+    /// The campus Dr.COM gateways. Most of the campus logs in through 172.18.3.3, some wireless areas through
+    /// 172.18.2.2. Login state is per gateway: a client logged in on one sees the other's login page.
+    /// Credentials are only ever sent to these addresses.
+    /// </summary>
+    public static readonly IReadOnlyList<string> Gateways = ["172.18.3.3", "172.18.2.2"];
+
+    public static string StatusUrl(string gateway) => $"http://{gateway}/1";
+
+    /// <summary>
+    /// The campus Dr.COM portal id, present on every page both gateways serve (status page logged in or not).
+    /// 172.18.x.x is private address space that other networks (home routers, Docker, WSL) also use, so a
+    /// gateway only counts as ours if its page carries this id; credentials are never sent otherwise.
+    /// </summary>
+    public const string PortalId = "AH0303797_000";
+
+    /// <summary>True if the page (raw bytes, GBK; the id is ASCII) comes from the campus portal.</summary>
+    public static bool IsCampusPortalPage(ReadOnlySpan<byte> page) =>
+        System.Text.Encoding.Latin1.GetString(page).Contains($"portalid='{PortalId}'", StringComparison.Ordinal);
 
     /// <summary>Real usage = reported flow × this factor (see <see cref="CampusStatus.ActualFlowBytes"/>).</summary>
     public const int ReportedFlowFactor = 2;
@@ -48,11 +66,25 @@ public static partial class CampusPortal
     /// </summary>
     public static CampusStatus? Parse(ReadOnlySpan<byte> body) => Parse(System.Text.Encoding.Latin1.GetString(body));
 
+    /// <summary>
+    /// Asks every gateway (in parallel) and returns the usage from the one this computer is logged in on.
+    /// Throws <see cref="InvalidDataException"/> if a gateway answered but none had usage (not logged in), and
+    /// the network error if none answered.
+    /// </summary>
     public static async Task<CampusStatus> QueryAsync(CancellationToken ct = default)
     {
-        using var handler = new HttpClientHandler { UseProxy = false };
-        using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) };
-        byte[] body = await http.GetByteArrayAsync(StatusUrl, ct).ConfigureAwait(false);
-        return Parse(body) ?? throw new InvalidDataException("页面中没有找到流量信息，可能尚未登录校园网");
+        using var http = CampusHttp.Create(TimeSpan.FromSeconds(5));
+        var attempts = Gateways.Select(async g =>
+        {
+            try { return (Status: Parse(await http.GetByteArrayAsync(StatusUrl(g), ct).ConfigureAwait(false)), Error: (Exception?)null); }
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException) { return (null, ex); }
+        }).ToList();
+        var results = await Task.WhenAll(attempts).ConfigureAwait(false);
+        if (results.FirstOrDefault(r => r.Status != null).Status is { } status)
+            return status;
+        if (results.Any(r => r.Error == null))
+            throw new InvalidDataException("页面中没有找到流量信息，可能尚未登录校园网");
+        ct.ThrowIfCancellationRequested();
+        throw results[0].Error!;
     }
 }

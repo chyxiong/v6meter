@@ -12,7 +12,7 @@
     <AssemblyTitle>v6meter 校园网 IPv4/IPv6 流量监控</AssemblyTitle>
     <Product>v6meter</Product>
     <Description>v6meter 校园网 IPv4/IPv6 流量监控</Description>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <ApplicationIcon>app.ico</ApplicationIcon>
   </PropertyGroup>

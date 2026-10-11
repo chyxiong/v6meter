@@ -35,6 +35,11 @@ internal sealed class TrayApp : ApplicationContext
     private long _runBytes;
     private readonly FileSystemWatcher? _configWatcher;
     private readonly System.Windows.Forms.Timer _reloadDebounce = new() { Interval = 500 };
+    private readonly CampusNetwork _campusNet = new();
+    private readonly CampusAutoLogin _autoLogin;
+    private readonly CancellationTokenSource _autoLoginCts = new();
+    private bool _announcedAutoLogin;
+    private AutoLoginState _lastNotifiedLoginState;
     private readonly System.Windows.Forms.Timer _campusRefresh = new() { Interval = (int)TimeSpan.FromHours(1).TotalMilliseconds };
     // Addresses change in bursts while a link comes up; query once it has settled.
     private readonly System.Windows.Forms.Timer _networkDebounce = new() { Interval = (int)TimeSpan.FromSeconds(10).TotalMilliseconds };
@@ -99,6 +104,10 @@ internal sealed class TrayApp : ApplicationContext
         }
         _engine.Tick += snap => _ui.Post(_ => OnSnapshot(snap), null);
 
+        _autoLogin = new CampusAutoLogin(_campusNet);
+        _autoLogin.Changed += () => _ui.Post(_ => OnAutoLoginChanged(), null);
+        _autoLogin.LoggedIn += gateway => _ui.Post(_ => OnAutoLoggedIn(), null);
+
         _menu = BuildMenu();
         _tray = new NotifyIcon
         {
@@ -146,6 +155,14 @@ internal sealed class TrayApp : ApplicationContext
         if (renderPath == null)
             _campusRefresh.Start();
         System.Net.NetworkInformation.NetworkChange.NetworkAddressChanged += OnNetworkAddressChanged;
+        System.Net.NetworkInformation.NetworkChange.NetworkAvailabilityChanged += OnNetworkAvailabilityChanged;
+        if (renderPath == null)
+        {
+            if (AppSettings.CampusAutoLogin)
+                _autoLogin.Account = CampusCredentials.Load();
+            var token = _autoLoginCts.Token;
+            _ = Task.Run(() => _autoLogin.RunAsync(token));
+        }
         if (showWindow || renderPath != null)
             ShowMainWindow();
     }
@@ -161,6 +178,7 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(_autostartItem);
         menu.Opening += (s, e) => RefreshAutostart();
         menu.Items.Add(BuildAlertMenu(menu));
+        menu.Items.Add(BuildAutoLoginMenu(menu));
         menu.Items.Add("打开配置文件", null, (s, e) => OpenConfig());
         if (Mode == MeterMode.User)
             menu.Items.Add("以管理员身份运行（显示进程、区分收费流量）", null, (s, e) => RestartElevated());
@@ -275,7 +293,7 @@ internal sealed class TrayApp : ApplicationContext
         _tray.Text = Tooltip(snap);
         _widget?.SetRates(snap.LastSecond.V4(NetDirection.Recv), snap.LastSecond.V6(NetDirection.Recv), _hot);
 
-        _form?.UpdateView(snap, new UsageView(_runBytes, _since, Mode == MeterMode.User, _campus, _campusAt, QuotaBytes));
+        _form?.UpdateView(snap, new UsageView(_runBytes, _since, Mode == MeterMode.User, _campus, _campusAt, QuotaBytes, AutoLoginNote()));
 
         if (_renderPath != null && ++_ticks == 12 && _form != null)
         {
@@ -301,6 +319,7 @@ internal sealed class TrayApp : ApplicationContext
         {
             _form = new MainForm(Mode) { Icon = _icons.Normal };
             _form.QueryCampusClicked += async (s, e) => await QueryCampusAsync();
+            _form.LoginCampusClicked += async (s, e) => await LoginCampusNowAsync();
             _form.OpenConfigClicked += (s, e) => OpenConfig();
             _form.RunAsAdminClicked += (s, e) => RestartElevated();
             _form.AutostartToggled += async (s, on) => await SetAutostartAsync(on);
@@ -430,8 +449,217 @@ internal sealed class TrayApp : ApplicationContext
 
     private bool _refreshing;
 
-    private void OnNetworkAddressChanged(object? sender, EventArgs e) =>
+    private void OnNetworkAddressChanged(object? sender, EventArgs e)
+    {
+        _autoLogin.NetworkChanged();
         _ui.Post(_ => { if (_campus == null && !_exiting) { _networkDebounce.Stop(); _networkDebounce.Start(); } }, null);
+    }
+
+    private void OnNetworkAvailabilityChanged(object? sender, System.Net.NetworkInformation.NetworkAvailabilityEventArgs e)
+    {
+        if (e.IsAvailable)
+            _autoLogin.NetworkChanged();
+    }
+
+    /// <summary>"自动登录校园网" submenu: status, on/off, account. Labels refresh when the menu opens.</summary>
+    private ToolStripMenuItem BuildAutoLoginMenu(ContextMenuStrip owner)
+    {
+        var root = new ToolStripMenuItem("自动登录校园网");
+        var status = new ToolStripMenuItem { Enabled = false };
+        var toggle = new ToolStripMenuItem("开启自动登录");
+        toggle.Click += (s, e) => SetAutoLogin(!AppSettings.CampusAutoLogin);
+        var forget = new ToolStripMenuItem("删除保存的账号密码", null, (s, e) => ForgetCampusAccount());
+        root.DropDownItems.Add(status);
+        root.DropDownItems.Add(new ToolStripSeparator());
+        root.DropDownItems.Add(toggle);
+        root.DropDownItems.Add("设置账号密码…", null, (s, e) => EditCampusAccount());
+        root.DropDownItems.Add(forget);
+        owner.Opening += (s, e) =>
+        {
+            bool on = AppSettings.CampusAutoLogin && _autoLogin.Account != null;
+            toggle.Checked = on;
+            status.Text = on ? AutoLoginStatusText() : "未开启";
+            root.Text = on && _autoLogin.State is AutoLoginState.WrongCredentials or AutoLoginState.Blocked
+                ? "自动登录校园网（已停止）" : "自动登录校园网";
+            forget.Enabled = _autoLogin.Account != null || CampusCredentials.Load() != null;
+        };
+        return root;
+    }
+
+    private string AutoLoginStatusText() => _autoLogin.State switch
+    {
+        AutoLoginState.Starting => "正在检查网络…",
+        AutoLoginState.Online => _autoLogin.LoggedInVia is { } g ? $"已在线（通过 {g} 登录）" : "已在线",
+        AutoLoginState.NoCampus => "等待连接校园网…",
+        AutoLoginState.Retrying => $"登录没成功，稍后重试：{_autoLogin.Message}",
+        AutoLoginState.WrongCredentials => $"{_autoLogin.Message}，已停止，请修改账号密码",
+        _ => _autoLogin.Message ?? "",
+    };
+
+    /// <summary>Card note for the states the user should act on or know about; null otherwise.</summary>
+    private string? AutoLoginNote() => AppSettings.CampusAutoLogin ? _autoLogin.State switch
+    {
+        AutoLoginState.WrongCredentials => $"自动登录已停止：{_autoLogin.Message}。请在托盘菜单里修改账号密码",
+        AutoLoginState.Blocked => $"自动登录失败：{_autoLogin.Message}",
+        AutoLoginState.Retrying => $"自动登录没成功，稍后重试：{_autoLogin.Message}",
+        _ => null,
+    } : null;
+
+    private void SetAutoLogin(bool on)
+    {
+        if (on)
+        {
+            var account = CampusCredentials.Load();
+            if (account == null)
+            {
+                EditCampusAccount(autoLoginDefault: true);
+                return;
+            }
+            AppSettings.CampusAutoLogin = true;
+            _autoLogin.Account = account;
+        }
+        else
+        {
+            AppSettings.CampusAutoLogin = false;
+            _autoLogin.Account = null;
+        }
+    }
+
+    /// <summary>Asks for the account; saves it and applies the auto-login checkbox. Returns the saved account, or null if cancelled.</summary>
+    /// <param name="autoLoginDefault">Initial state of the checkbox; defaults to the current setting (on for a first setup).</param>
+    private CampusAccount? EditCampusAccount(bool? autoLoginDefault = null)
+    {
+        var current = CampusCredentials.Load();
+        using var dialog = new CampusAccountDialog(current, autoLoginDefault ?? (current == null || AppSettings.CampusAutoLogin));
+        if (dialog.ShowDialog(_form) != DialogResult.OK)
+            return null;
+        var account = dialog.Result;
+        try
+        {
+            CampusCredentials.Save(account);
+        }
+        catch (Win32Exception ex)
+        {
+            MessageBox.Show(_form, $"保存账号密码失败：{ex.Message}", "自动登录校园网", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return null;
+        }
+        AppSettings.CampusAutoLogin = dialog.AutoLogin;
+        _lastNotifiedLoginState = default;
+        _autoLogin.Account = dialog.AutoLogin ? account : null;
+        return account;
+    }
+
+    private bool _loggingIn;
+
+    /// <summary>
+    /// The "登录校园网" button: log in once now with the saved account (asking for one first if there is none)
+    /// and say what happened. Runs from a click handler (async void upstream), so every failure ends in a box.
+    /// </summary>
+    private async Task LoginCampusNowAsync()
+    {
+        if (_loggingIn)
+            return;
+        var account = CampusCredentials.Load() ?? EditCampusAccount();
+        if (account == null)
+            return;
+        _loggingIn = true;
+        _form?.SetLoginBusy(true);
+        LoginAttempt attempt;
+        try
+        {
+            attempt = await _autoLogin.LoginNowAsync(account, _autoLoginCts.Token); // serialized with the auto-login loop
+        }
+        catch (OperationCanceledException)
+        {
+            return; // exiting
+        }
+        catch (Exception ex)
+        {
+            attempt = new LoginAttempt(AttemptResult.Failed, Message: ex.Message);
+        }
+        finally
+        {
+            _loggingIn = false;
+            if (!_exiting)
+                _form?.SetLoginBusy(false);
+        }
+        if (_exiting)
+            return;
+
+        const string title = "登录校园网";
+        switch (attempt.Result)
+        {
+            case AttemptResult.AlreadyOnline:
+                MessageBox.Show(_form, "已经在线了，不用再登录。", title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                break;
+            case AttemptResult.LoggedIn:
+                _autoLogin.NetworkChanged(); // let the auto-login status catch up
+                _ = RefreshCampusSilentlyAsync();
+                MessageBox.Show(_form, $"登录成功（{attempt.Gateway}）。", title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                break;
+            case AttemptResult.LoggedInButOffline:
+                MessageBox.Show(_form, "学校系统显示你已经登录了，但还是上不了外网。\n\n可能正处在学校的断网时段，或者账号欠费、流量超限。", title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                break;
+            case AttemptResult.NoCampus:
+                MessageBox.Show(_form, "连不上学校的登录网关。\n\n请检查电脑是否已经连上校园网（宿舍网线或校园 Wi-Fi）。", title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                break;
+            case AttemptResult.WrongCredentials:
+                if (MessageBox.Show(_form, $"{attempt.Message}。现在修改账号密码吗？", title, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes
+                    && EditCampusAccount() != null)
+                    await LoginCampusNowAsync();
+                break;
+            default:
+                MessageBox.Show(_form, $"没有登录成功：{attempt.Message}。\n\n可能是账号欠费、流量超限，或者正处在学校的断网时段。", title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                break;
+        }
+    }
+
+    private void ForgetCampusAccount()
+    {
+        if (MessageBox.Show(_form, "删除保存的校园网账号密码，并关闭自动登录？", "自动登录校园网", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK)
+            return;
+        try { CampusCredentials.Delete(); }
+        catch (Win32Exception ex)
+        {
+            MessageBox.Show(_form, $"删除失败：{ex.Message}", "自动登录校园网", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        AppSettings.CampusAutoLogin = false;
+        _autoLogin.Account = null;
+    }
+
+    private void OnAutoLoginChanged()
+    {
+        if (_exiting)
+            return;
+        var state = _autoLogin.State;
+        // Only the states that need the user, once each until something else happens.
+        if (state != _lastNotifiedLoginState && state is AutoLoginState.WrongCredentials or AutoLoginState.Blocked)
+        {
+            _lastNotifiedLoginState = state;
+            Notify("校园网自动登录已停止",
+                state == AutoLoginState.WrongCredentials
+                    ? $"{_autoLogin.Message}。请在托盘菜单“自动登录校园网”里修改账号密码。"
+                    : $"{_autoLogin.Message}。v6meter 会隔一段时间再试。",
+                ToolTipIcon.Warning);
+        }
+        else if (state == AutoLoginState.Online)
+        {
+            _lastNotifiedLoginState = state;
+        }
+    }
+
+    private void OnAutoLoggedIn()
+    {
+        if (_exiting)
+            return;
+        if (!_announcedAutoLogin)
+        {
+            _announcedAutoLogin = true;
+            Notify("已自动登录校园网", "掉线后 v6meter 会自动重新登录。", ToolTipIcon.Info);
+        }
+        _ = RefreshCampusSilentlyAsync();
+    }
 
     // Runs from a button click (async void upstream): every failure must end in a message box, never an unhandled exception.
     private async Task QueryCampusAsync()
@@ -523,7 +751,10 @@ internal sealed class TrayApp : ApplicationContext
     private void OnPowerModeChanged(object? sender, PowerModeChangedEventArgs e)
     {
         if (e.Mode == PowerModes.Resume)
+        {
             _engine.NotifyResumed();
+            _autoLogin.NetworkChanged();
+        }
     }
 
     // NotifyIcon has one notification slot, so a click always belongs to the last one shown.
@@ -542,6 +773,9 @@ internal sealed class TrayApp : ApplicationContext
         _exiting = true;
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;
         System.Net.NetworkInformation.NetworkChange.NetworkAddressChanged -= OnNetworkAddressChanged;
+        System.Net.NetworkInformation.NetworkChange.NetworkAvailabilityChanged -= OnNetworkAvailabilityChanged;
+        _autoLoginCts.Cancel();
+        _campusNet.Dispose();
         _campusRefresh.Dispose();
         _networkDebounce.Dispose();
         _configWatcher?.Dispose();

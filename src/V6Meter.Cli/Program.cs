@@ -15,6 +15,9 @@ using V6Meter.Core.Model;
 //   --summary-every M    also print the cumulative summary every M minutes (long runs, acceptance test 7)
 //   --config path        config.json to use (default: next to the exe; created if missing)
 //   --interfaces         print how each network adapter is classified, then exit (no admin needed)
+//   --campus-check       IPv4 connectivity probe, reachable campus gateways (and whether logged in on each) and usage, without logging in
+//   --campus-fake-login [gateway]  login with a made-up account to see the failure reply (default 172.18.2.2;
+//                        never use the gateway you are logged in on)
 //   --dump / --dualstack / --procstart   M0 experiments, see Experiments.cs
 //   --clock [seconds]    ETW timestamp vs Stopwatch clock, delivery lag, per-second bytes by arrival vs by timestamp
 //   --blast <seconds> [chunk]            loopback TCP load generator for the M2 CPU test (no ETW session)
@@ -30,6 +33,42 @@ if (opts.TryGetValue("clock", out var clock))
 
 if (opts.TryGetValue("blast", out var blast))
     return await Experiments.LoopbackBlastAsync(int.Parse(blast[0]), blast.Length > 1 ? int.Parse(blast[1]) : 65536);
+
+if (opts.TryGetValue("campus-fake-login", out var fakeLogin))
+{
+    // Sends a login with a made-up account (never a real one) to see how a gateway answers a failure.
+    // Use a gateway this computer is NOT logged in on: a failed attempt may disturb the current session.
+    string gw = fakeLogin.Length > 0 ? fakeLogin[0] : "172.18.2.2";
+    if (!V6Meter.Core.Campus.CampusPortal.Gateways.Contains(gw))
+    {
+        Console.Error.WriteLine($"只能是这几个网关之一：{string.Join(", ", V6Meter.Core.Campus.CampusPortal.Gateways)}");
+        return 1;
+    }
+    using var net = new V6Meter.Core.Campus.CampusNetwork();
+    var reply = await net.LoginAsync(gw, new V6Meter.Core.Campus.CampusAccount("v6meter-test", "wrong-password"), default);
+    Console.WriteLine($"{gw}：{reply.Outcome}（{reply.Message}）");
+    return 0;
+}
+
+if (opts.ContainsKey("campus-check"))
+{
+    // What auto-login would see right now, without logging in.
+    using var net = new V6Meter.Core.Campus.CampusNetwork();
+    var probe = await net.ProbeAsync(default);
+    Console.WriteLine($"IPv4 连通性：{(probe.Online ? "在线" : "不在线")}{(probe.RedirectGateway is { } rg ? $"，被重定向到 {rg}" : "")}");
+    var gateways = await net.CheckGatewaysAsync(default);
+    Console.WriteLine($"能访问的校园网网关：{(gateways.Count == 0 ? "无" : string.Join(", ", gateways.Select(s => $"{s.Gateway}（{(s.LoggedIn ? "本机已登录" : "未登录")}）")))}");
+    try
+    {
+        var usage = await V6Meter.Core.Campus.CampusPortal.QueryAsync();
+        Console.WriteLine($"学校记录：已用 {usage.ActualFlowBytes / 1073741824.0:F3} GB（显示值 ×2）");
+    }
+    catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or InvalidDataException)
+    {
+        Console.WriteLine($"学校记录：查不到（{ex.Message}）");
+    }
+    return 0;
+}
 
 if (opts.ContainsKey("interfaces"))
 {
@@ -50,7 +89,7 @@ foreach (var err in configErrors)
 bool quiet = opts.ContainsKey("quiet");
 int summaryEvery = opts.TryGetValue("summary-every", out var se) ? int.Parse(se[0]) * 60 : 0;
 
-using var engine = new MeterEngine(classifierOptions);
+using var engine = new MeterEngine(classifierOptions, KernelNetworkSession.CliSessionName);
 MeterSnapshot? last = null;
 int ticks = 0;
 engine.Tick += snap =>

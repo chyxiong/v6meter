@@ -38,7 +38,7 @@ internal static class Experiments
             }
         }
 
-        using var session = new KernelNetworkSession(OnNet);
+        using var session = new KernelNetworkSession(OnNet, sessionName: KernelNetworkSession.CliSessionName);
         session.Start();
         Console.WriteLine($"Stopwatch.Frequency={Stopwatch.Frequency} IsHighResolution={Stopwatch.IsHighResolution}");
         await Task.Delay(TimeSpan.FromSeconds(seconds));
@@ -98,7 +98,7 @@ internal static class Experiments
                     Console.WriteLine($"ProcessStart pid={e.Pid} created={e.CreateTimeUtc:O} image={e.ImageName}");
         }
 
-        using var session = new KernelNetworkSession(OnNet, procLeft > 0 ? OnProcessStart : null);
+        using var session = new KernelNetworkSession(OnNet, procLeft > 0 ? OnProcessStart : null, KernelNetworkSession.CliSessionName);
         session.Start();
         Console.WriteLine($"Session '{session.SessionName}' started.");
 

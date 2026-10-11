@@ -36,6 +36,29 @@ public class ProcessResolverTests
     }
 
     [Fact]
+    public void RevalidationCatchesAPidReusedWhileStartEventsWereMissed()
+    {
+        // The cache says this PID is old.exe, but a different process (this test host) now holds it: its start
+        // event was "missed". Without revalidation the stale name sticks; with it the live process wins.
+        uint pid = (uint)Environment.ProcessId;
+        var r = new ProcessResolver();
+        r.OnProcessStart(new ProcessStartEvent(pid, new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc), @"C:\old\old.exe"));
+        Assert.Equal(@"C:\old\old.exe", r.Resolve(pid).ExePath);
+
+        r.Revalidate();
+        Assert.Equal(Environment.ProcessPath, r.Resolve(pid).ExePath, ignoreCase: true);
+    }
+
+    [Fact]
+    public void RevalidationKeepsTheRecordWhenTheProcessIsGone()
+    {
+        var r = new ProcessResolver();
+        r.OnProcessStart(Start(@"C:\old\old.exe", 100)); // a PID no live process has
+        r.Revalidate();
+        Assert.Equal(@"C:\old\old.exe", r.Resolve(Pid, 105).ExePath); // exited: its last traffic still has its name
+    }
+
+    [Fact]
     public void TrafficBeforeTheOnlyKnownStartIsNotGivenToIt()
     {
         var r = new ProcessResolver();
